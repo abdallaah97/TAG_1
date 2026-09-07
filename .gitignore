@@ -1,0 +1,32 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Bb]uild/
+[Pp]ublish/
+
+## NuGet
+*.nupkg
+packages/
+.nuget/
+
+## Local secrets - never commit a real connection string or signing key
+appsettings.Local.json
+appsettings.Production.json
+secrets.json
+
+## Logs and databases
+*.log
+*.mdf
+*.ldf
