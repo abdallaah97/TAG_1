@@ -5,10 +5,35 @@ role / permission (policy) system that an administrator manages at runtime.
 
 ```
 Domain           entities only, no dependencies
-Application      services, DTOs, repository contract, permission catalog
-Infrastructure   EF Core context, configurations, migrations, seed data, repository
+Application      services, DTOs, unit of work and repository contracts, permission catalog
+Infrastructure   EF Core context, configurations, migrations, seed data, unit of work
 API              controllers, authorization plumbing, middleware, composition root
 ```
+
+## Persistence
+
+A service never touches the `DbContext` and never injects a repository directly, it injects
+`IUnitOfWork` (`Application/Repositories/IUnitOfWork.cs`). The unit of work is scoped, exactly
+like the context it wraps, and hands out one cached `IGenericRepository<T>` per entity:
+
+```csharp
+var user = await _unitOfWork.Users.GetByIdAsync(id);
+user.IsActive = false;
+_unitOfWork.Users.Update(user);
+
+await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.UserDeactivated);
+
+// Rows from two different tables, one commit.
+await _unitOfWork.SaveChangesAsync();
+```
+
+The repositories only read and stage; `SaveChanges` lives on the unit of work alone. That is what
+makes the guard rails hold: disabling an account and killing its sessions, or swapping the roles
+of a user and dropping the tokens that still carry the old ones, either happen together or not at
+all. A service method stages everything it needs and commits once at the end.
+
+Entities without a dedicated property on `IUnitOfWork` are reachable through
+`_unitOfWork.Repository<T>()`.
 
 ## Running it
 
@@ -110,6 +135,7 @@ registration or separate handler is involved.
 | --- | --- |
 | `GET /api/Users/GetAllUsers` | `Users.View` |
 | `GET /api/Users/GetUserById` | `Users.View` |
+| `GET /api/Users/ExportUsers` | `Users.View` |
 | `POST /api/Users/CreateUser` | `Users.Create` |
 | `PUT /api/Users/UpdateUser` | `Users.Update` |
 | `PUT /api/Users/SetUserActiveState` | `Users.Update` |
@@ -129,6 +155,77 @@ change a single entry.
 - A role that is still assigned to users can not be deleted.
 - The system can never be left without an active super admin.
 - Nobody can delete or disable their own account.
+
+## Rate limiting
+
+`API/Middleware/RateLimitMiddleware.cs` counts the requests of one caller inside a fixed window
+and answers `429 Too Many Requests` once the limit is used up. It runs after `UseAuthentication`,
+so a signed in caller is counted per account (`id` claim) and only an anonymous one per IP.
+
+The counters live in `IMemoryCache`, one entry per caller with an absolute expiration: when the
+entry expires the window is over and the caller starts from zero again.
+
+```json
+"RateLimit": {
+  "PermitLimit": 100,
+  "WindowSeconds": 60
+}
+```
+
+The counters are per process, so two instances behind a load balancer allow twice the limit; a
+shared store (`IDistributedCache`, Redis) is what replaces `IMemoryCache` at that point.
+
+## Design patterns
+
+Two small features are built as **Strategy + Factory**. Both have the same shape: one
+interface, a couple of classes that implement it, and a factory that is the only thing that
+picks which one is used.
+
+| | Strategy | Factory |
+| --- | --- | --- |
+| Answers | *how* the work is done | *which* one is used |
+| Password rules | `IPasswordPolicy` | `IPasswordPolicyFactory` |
+| Export formats | `IUserExportStrategy` | `IUserExportStrategyFactory` |
+
+### Password policies
+
+`Application/Common/Security/` holds two policies:
+
+| `Security:PasswordPolicy` | Rule |
+| --- | --- |
+| `Basic` | at least 6 characters |
+| `Strong` | at least 8 characters, one upper case letter, one digit and one symbol |
+
+The factory reads the setting on every call, so editing `appsettings.json` while the API is
+running changes the rules on the next request. Every call site looks the same and never names
+a concrete policy:
+
+```csharp
+var policy = _passwordPolicyFactory.Create();
+
+if (!policy.IsValid(input.Password))
+{
+    throw new BadRequestException($"Weak password. {policy.Description}");
+}
+```
+
+### Export formats
+
+`GET /api/Users/ExportUsers?format=csv` (or `json`) reuses the normal user listing and hands
+the rows to a strategy. `UserService.ExportUsers` never learns which format came out; an
+unknown format is a 400 from the factory.
+
+Adding Excel would be one new class plus one line in `UserExportStrategyFactory`.
+
+### Already here before the demo
+
+| In the code | Pattern |
+| --- | --- |
+| `IUnitOfWork.Repository<T>()` | Factory |
+| `IPasswordHasher<User>` injected into the services | Strategy |
+| `IGenericRepository<T>` | Repository |
+| `IUnitOfWork` | Unit of Work |
+| `ExceptionHandlingMiddleware` and the rest of the pipeline | Chain of Responsibility |
 
 ## Shipping it
 

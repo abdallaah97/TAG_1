@@ -18,6 +18,8 @@ namespace Infrastructure.Configurations
             builder.Property(u => u.Password).IsRequired().HasMaxLength(500);
 
             builder.HasIndex(u => u.Email).IsUnique();
+
+            builder.HasQueryFilter(u => u.IsActive);
         }
     }
 }

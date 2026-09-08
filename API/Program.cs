@@ -1,5 +1,6 @@
 using API.BackgroundServices;
 using API.Middleware;
+using Application.Common.Security;
 using Application.Common.Settings;
 using Application.Repositories;
 using Application.Services.AuthService;
@@ -9,6 +10,7 @@ using Application.Services.RoleService;
 using Application.Services.SecurityService;
 using Application.Services.TokenService;
 using Application.Services.UserService;
+using Application.Services.UserService.Export;
 using Domain.Entities;
 using Hangfire;
 using Infrastructure.Context;
@@ -94,7 +96,9 @@ builder.Services.AddSwaggerGen(c =>
 
 builder.Services.AddHttpContextAccessor();
 
-builder.Services.AddScoped(typeof(IGenericRepository<>), typeof(GenericRepository<>));
+builder.Services.AddMemoryCache();
+
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IUserSecurityService, UserSecurityService>();
@@ -103,6 +107,10 @@ builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IRoleService, RoleService>();
 builder.Services.AddScoped<IDemoUserSeederService, DemoUserSeederService>();
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
+
+
+builder.Services.AddSingleton<IPasswordPolicyFactory, PasswordPolicyFactory>();
+builder.Services.AddSingleton<IUserExportStrategyFactory, UserExportStrategyFactory>();
 
 builder.Services.AddCors(options =>
 {
@@ -129,6 +137,7 @@ var app = builder.Build();
 await DatabaseSeeder.SeedAsync(app.Services);
 
 // Configure the HTTP request pipeline.
+app.UseMiddleware<RateLimitMiddleware>();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
@@ -148,6 +157,8 @@ RecurringJob.AddOrUpdate<IDemoUserSeederService>(
 app.UseCors("CorsPolicy");
 
 app.UseAuthentication();
+
+
 app.UseAuthorization();
 
 app.MapControllers();

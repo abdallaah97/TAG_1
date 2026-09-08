@@ -36,8 +36,9 @@ namespace Application.Services.UserService.DTOs
 
         public string PhoneNumber { get; set; } = string.Empty;
 
+        // The rules live in IPasswordPolicy and are chosen at runtime, so there is nothing
+        // sensible to hard code in an attribute here.
         [Required]
-        [MinLength(6)]
         public string Password { get; set; } = string.Empty;
 
         public bool IsActive { get; set; } = true;
@@ -66,7 +67,6 @@ namespace Application.Services.UserService.DTOs
         public int UserId { get; set; }
 
         [Required]
-        [MinLength(6)]
         public string NewPassword { get; set; } = string.Empty;
 
         [Required]

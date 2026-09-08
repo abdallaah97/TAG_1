@@ -15,7 +15,5 @@ namespace Application.Repositories
         public Task InsertAsync(T input);
         public void InsertRange(IEnumerable<T> input);
         public Task InsertRangeAsync(IEnumerable<T> input);
-        public void SaveChanges();
-        public Task SaveChangesAsync();
     }
 }

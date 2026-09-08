@@ -8,7 +8,6 @@ namespace Application.Services.AuthService.DTOs
         public string OldPassword { get; set; } = string.Empty;
 
         [Required]
-        [MinLength(6)]
         public string NewPassword { get; set; } = string.Empty;
 
         [Required]

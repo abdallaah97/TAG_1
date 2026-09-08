@@ -9,29 +9,20 @@ namespace Application.Services.RoleService
 {
     public class RoleService : IRoleService
     {
-        private readonly IGenericRepository<Role> _roleRepository;
-        private readonly IGenericRepository<Permission> _permissionRepository;
-        private readonly IGenericRepository<RolePermission> _rolePermissionRepository;
-        private readonly IGenericRepository<UserRole> _userRoleRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IUserSecurityService _userSecurityService;
 
         public RoleService(
-            IGenericRepository<Role> roleRepository,
-            IGenericRepository<Permission> permissionRepository,
-            IGenericRepository<RolePermission> rolePermissionRepository,
-            IGenericRepository<UserRole> userRoleRepository,
+            IUnitOfWork unitOfWork,
             IUserSecurityService userSecurityService)
         {
-            _roleRepository = roleRepository;
-            _permissionRepository = permissionRepository;
-            _rolePermissionRepository = rolePermissionRepository;
-            _userRoleRepository = userRoleRepository;
+            _unitOfWork = unitOfWork;
             _userSecurityService = userSecurityService;
         }
 
         public async Task<List<GetRoleDto>> GetAllRoles(GetAllRolesInputDto input)
         {
-            var query = _roleRepository.GetAllReadOnly()
+            var query = _unitOfWork.Roles.GetAllReadOnly()
                 .Include(x => x.RolePermissions)
                 .ThenInclude(x => x.Permission).AsQueryable();
 
@@ -66,7 +57,7 @@ namespace Application.Services.RoleService
 
         public async Task<RoleDetailsDto> GetRoleById(int id)
         {
-            var role = await _roleRepository.GetAllReadOnly()
+            var role = await _unitOfWork.Roles.GetAllReadOnly()
                 .Include(r => r.RolePermissions).ThenInclude(rp => rp.Permission)
                 .Include(r => r.UserRoles)
                 .FirstOrDefaultAsync(r => r.Id == id)
@@ -93,7 +84,7 @@ namespace Application.Services.RoleService
             var name = input.Name.Trim();
             var normalizedName = name.ToUpperInvariant();
 
-            var isNameTaken = await _roleRepository.GetAllReadOnly()
+            var isNameTaken = await _unitOfWork.Roles.GetAllReadOnly()
                 .AnyAsync(r => r.NormalizedName == normalizedName);
 
             if (isNameTaken)
@@ -115,15 +106,15 @@ namespace Application.Services.RoleService
                     .ToList()
             };
 
-            await _roleRepository.InsertAsync(role);
-            await _roleRepository.SaveChangesAsync();
+            await _unitOfWork.Roles.InsertAsync(role);
+            await _unitOfWork.SaveChangesAsync();
 
             return role.Id;
         }
 
         public async Task UpdateRole(UpdateRoleDto input)
         {
-            var role = await _roleRepository.GetByIdAsync(input.Id)
+            var role = await _unitOfWork.Roles.GetByIdAsync(input.Id)
                 ?? throw new NotFoundException("Role", input.Id);
 
             var name = input.Name.Trim();
@@ -135,7 +126,7 @@ namespace Application.Services.RoleService
                 throw new BadRequestException("A system role can not be renamed");
             }
 
-            var isNameTaken = await _roleRepository.GetAllReadOnly()
+            var isNameTaken = await _unitOfWork.Roles.GetAllReadOnly()
                 .AnyAsync(r => r.NormalizedName == normalizedName && r.Id != input.Id);
 
             if (isNameTaken)
@@ -147,13 +138,13 @@ namespace Application.Services.RoleService
             role.NormalizedName = normalizedName;
             role.Description = input.Description?.Trim();
 
-            _roleRepository.Update(role);
-            await _roleRepository.SaveChangesAsync();
+            _unitOfWork.Roles.Update(role);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task DeleteRole(int id)
         {
-            var role = await _roleRepository.GetAll()
+            var role = await _unitOfWork.Roles.GetAll()
                 .Include(r => r.RolePermissions)
                 .Include(r => r.UserRoles)
                 .FirstOrDefaultAsync(r => r.Id == id)
@@ -169,14 +160,14 @@ namespace Application.Services.RoleService
                 throw new BadRequestException("This role is assigned to users, remove the assignments first");
             }
 
-            _rolePermissionRepository.DeleteRange(role.RolePermissions);
-            _roleRepository.Delete(role);
-            await _roleRepository.SaveChangesAsync();
+            _unitOfWork.RolePermissions.DeleteRange(role.RolePermissions);
+            _unitOfWork.Roles.Delete(role);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task<List<PermissionGroupDto>> GetAllPermissions()
         {
-            var permissions = await _permissionRepository.GetAllReadOnly()
+            var permissions = await _unitOfWork.Permissions.GetAllReadOnly()
                 .OrderBy(p => p.Group).ThenBy(p => p.Id)
                 .ToListAsync();
 
@@ -194,7 +185,7 @@ namespace Application.Services.RoleService
         {
             await EnsureRoleExistsAsync(roleId);
 
-            return await _rolePermissionRepository.GetAllReadOnly()
+            return await _unitOfWork.RolePermissions.GetAllReadOnly()
                 .Where(rp => rp.RoleId == roleId)
                 .OrderBy(rp => rp.Permission.Group).ThenBy(rp => rp.Permission.Id)
                 .Select(rp => new PermissionDto
@@ -209,7 +200,7 @@ namespace Application.Services.RoleService
 
         public async Task UpdateRolePermissions(UpdateRolePermissionsDto input)
         {
-            var role = await _roleRepository.GetAll()
+            var role = await _unitOfWork.Roles.GetAll()
                 .Include(r => r.RolePermissions)
                 .FirstOrDefaultAsync(r => r.Id == input.RoleId)
                 ?? throw new NotFoundException("Role", input.RoleId);
@@ -230,9 +221,9 @@ namespace Application.Services.RoleService
                 return;
             }
 
-            _rolePermissionRepository.DeleteRange(removed);
+            _unitOfWork.RolePermissions.DeleteRange(removed);
 
-            await _rolePermissionRepository.InsertRangeAsync(addedIds
+            await _unitOfWork.RolePermissions.InsertRangeAsync(addedIds
                 .Select(permissionId => new RolePermission
                 {
                     RoleId = role.Id,
@@ -243,12 +234,13 @@ namespace Application.Services.RoleService
 
             await RevokeSessionsOfRoleAsync(role.Id);
 
-            await _rolePermissionRepository.SaveChangesAsync();
+            // The changed grants and the sessions they invalidate land in one commit.
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task AddPermissionToRole(int roleId, string permission)
         {
-            var role = await _roleRepository.GetByIdAsync(roleId)
+            var role = await _unitOfWork.Roles.GetByIdAsync(roleId)
                 ?? throw new NotFoundException("Role", roleId);
 
             if (role.Name == SystemRoles.SuperAdmin)
@@ -258,7 +250,7 @@ namespace Application.Services.RoleService
 
             var entity = await FindPermissionAsync(permission);
 
-            var alreadyGranted = await _rolePermissionRepository.GetAllReadOnly()
+            var alreadyGranted = await _unitOfWork.RolePermissions.GetAllReadOnly()
                 .AnyAsync(rp => rp.RoleId == roleId && rp.PermissionId == entity.Id);
 
             if (alreadyGranted)
@@ -266,7 +258,7 @@ namespace Application.Services.RoleService
                 throw new ConflictException("This permission is already granted to the role");
             }
 
-            await _rolePermissionRepository.InsertAsync(new RolePermission
+            await _unitOfWork.RolePermissions.InsertAsync(new RolePermission
             {
                 RoleId = roleId,
                 PermissionId = entity.Id,
@@ -275,12 +267,12 @@ namespace Application.Services.RoleService
 
             await RevokeSessionsOfRoleAsync(roleId);
 
-            await _rolePermissionRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task RemovePermissionFromRole(int roleId, string permission)
         {
-            var role = await _roleRepository.GetByIdAsync(roleId)
+            var role = await _unitOfWork.Roles.GetByIdAsync(roleId)
                 ?? throw new NotFoundException("Role", roleId);
 
             if (role.Name == SystemRoles.SuperAdmin)
@@ -290,22 +282,22 @@ namespace Application.Services.RoleService
 
             var entity = await FindPermissionAsync(permission);
 
-            var rolePermission = await _rolePermissionRepository.GetAll()
+            var rolePermission = await _unitOfWork.RolePermissions.GetAll()
                 .FirstOrDefaultAsync(rp => rp.RoleId == roleId && rp.PermissionId == entity.Id)
                 ?? throw new NotFoundException("This permission is not granted to the role");
 
-            _rolePermissionRepository.Delete(rolePermission);
+            _unitOfWork.RolePermissions.Delete(rolePermission);
 
             await RevokeSessionsOfRoleAsync(roleId);
 
-            await _rolePermissionRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task<List<RoleUserDto>> GetRoleUsers(int roleId)
         {
             await EnsureRoleExistsAsync(roleId);
 
-            return await _userRoleRepository.GetAllReadOnly()
+            return await _unitOfWork.UserRoles.GetAllReadOnly()
                 .Where(ur => ur.RoleId == roleId)
                 .OrderBy(ur => ur.User.Name)
                 .Select(ur => new RoleUserDto
@@ -322,17 +314,17 @@ namespace Application.Services.RoleService
         // so their refresh tokens are dropped and the next refresh forces a fresh sign in.
         private async Task RevokeSessionsOfRoleAsync(int roleId)
         {
-            var userIds = await _userRoleRepository.GetAllReadOnly()
+            var userIds = await _unitOfWork.UserRoles.GetAllReadOnly()
                 .Where(ur => ur.RoleId == roleId)
                 .Select(ur => ur.UserId)
                 .ToListAsync();
 
-            await _userSecurityService.RevokeUsersTokensAsync(userIds, RevokeReasons.SecurityChanged, saveChanges: false);
+            await _userSecurityService.RevokeUsersTokensAsync(userIds, RevokeReasons.SecurityChanged);
         }
 
         private async Task EnsureRoleExistsAsync(int roleId)
         {
-            var exists = await _roleRepository.GetAllReadOnly().AnyAsync(r => r.Id == roleId);
+            var exists = await _unitOfWork.Roles.GetAllReadOnly().AnyAsync(r => r.Id == roleId);
             if (!exists)
             {
                 throw new NotFoundException("Role", roleId);
@@ -343,7 +335,7 @@ namespace Application.Services.RoleService
         {
             var name = permission.Trim();
 
-            return await _permissionRepository.GetAllReadOnly().FirstOrDefaultAsync(p => p.Name == name)
+            return await _unitOfWork.Permissions.GetAllReadOnly().FirstOrDefaultAsync(p => p.Name == name)
                 ?? throw new NotFoundException($"Permission '{name}' does not exist");
         }
 
@@ -360,7 +352,7 @@ namespace Application.Services.RoleService
                 return new List<Permission>();
             }
 
-            var permissions = await _permissionRepository.GetAllReadOnly()
+            var permissions = await _unitOfWork.Permissions.GetAllReadOnly()
                 .Where(p => names.Contains(p.Name))
                 .ToListAsync();
 

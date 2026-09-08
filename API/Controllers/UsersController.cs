@@ -26,6 +26,15 @@ namespace API.Controllers
             return Ok(users);
         }
 
+        // ?format=csv or ?format=json - the factory decides which strategy writes the file.
+        [HasPermission(Permissions.Users.View)]
+        [HttpGet("ExportUsers")]
+        public async Task<IActionResult> ExportUsers([FromQuery] GetAllUsersInputDto input, [FromQuery] string format = "csv")
+        {
+            var file = await _userService.ExportUsers(input, format);
+            return File(file.Content, file.ContentType, file.FileName);
+        }
+
         [HasPermission(Permissions.Users.View)]
         [HttpGet("GetUserById")]
         public async Task<IActionResult> GetUserById([FromQuery] int id)

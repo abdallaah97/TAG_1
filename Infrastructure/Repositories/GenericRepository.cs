@@ -80,15 +80,5 @@ namespace Infrastructure.Repositories
         {
             await _dbSet.AddRangeAsync(input);
         }
-
-        public void SaveChanges()
-        {
-            _context.SaveChanges();
-        }
-
-        public async Task SaveChangesAsync()
-        {
-            await _context.SaveChangesAsync();
-        }
     }
 }

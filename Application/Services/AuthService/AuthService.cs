@@ -1,4 +1,5 @@
 using Application.Common.Exceptions;
+using Application.Common.Security;
 using Application.Repositories;
 using Application.Services.AuthService.DTOs;
 using Application.Services.CurrentUserService;
@@ -12,27 +13,27 @@ namespace Application.Services.AuthService
 {
     public class AuthService : IAuthService
     {
-        private readonly IGenericRepository<User> _userRepository;
-        private readonly IGenericRepository<RefreshToken> _refreshTokenRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly ITokenService _tokenService;
         private readonly ICurrentUserService _currentUserService;
         private readonly IUserSecurityService _userSecurityService;
         private readonly IPasswordHasher<User> _passwordHasher;
+        private readonly IPasswordPolicyFactory _passwordPolicyFactory;
 
         public AuthService(
-            IGenericRepository<User> userRepository,
-            IGenericRepository<RefreshToken> refreshTokenRepository,
+            IUnitOfWork unitOfWork,
             ITokenService tokenService,
             ICurrentUserService currentUserService,
             IUserSecurityService userSecurityService,
-            IPasswordHasher<User> passwordHasher)
+            IPasswordHasher<User> passwordHasher,
+            IPasswordPolicyFactory passwordPolicyFactory)
         {
-            _userRepository = userRepository;
-            _refreshTokenRepository = refreshTokenRepository;
+            _unitOfWork = unitOfWork;
             _tokenService = tokenService;
             _currentUserService = currentUserService;
             _userSecurityService = userSecurityService;
             _passwordHasher = passwordHasher;
+            _passwordPolicyFactory = passwordPolicyFactory;
         }
 
         public async Task<AuthResponseDto> LoginAsync(LoginInputDto input)
@@ -66,18 +67,23 @@ namespace Application.Services.AuthService
             }
 
             user.LastLoginAt = DateTime.UtcNow;
-            _userRepository.Update(user);
+            _unitOfWork.Users.Update(user);
 
             await RemoveObsoleteTokensAsync(user.Id);
 
-            return await IssueTokensAsync(user);
+            var response = await IssueTokensAsync(user);
+
+            // Rehashed password, last login, housekeeping and the new token: one commit.
+            await _unitOfWork.SaveChangesAsync();
+
+            return response;
         }
 
         public async Task<AuthResponseDto> RefreshTokenAsync(RefreshTokenInputDto input)
         {
             var hash = _tokenService.Hash(input.RefreshToken);
 
-            var storedToken = await _refreshTokenRepository.GetAll()
+            var storedToken = await _unitOfWork.RefreshTokens.GetAll()
                 .FirstOrDefaultAsync(t => t.TokenHash == hash);
 
             if (storedToken == null)
@@ -90,6 +96,8 @@ namespace Application.Services.AuthService
             if (storedToken.IsRevoked)
             {
                 await _userSecurityService.RevokeUserTokensAsync(storedToken.UserId, RevokeReasons.ReuseDetected);
+                await _unitOfWork.SaveChangesAsync();
+
                 throw new UnauthorizedException("Invalid refresh token");
             }
 
@@ -113,14 +121,15 @@ namespace Application.Services.AuthService
 
             // Roles and permissions are read again from the database, so a refresh always
             // hands back a token that reflects the current state of the account.
-            var response = await IssueTokensAsync(user, storedToken, saveChanges: false);
+            var response = await IssueTokensAsync(user, storedToken);
 
             storedToken.RevokedAt = DateTime.UtcNow;
             storedToken.RevokedReason = RevokeReasons.Rotated;
             storedToken.RevokedByIp = _currentUserService.IpAddress;
-            _refreshTokenRepository.Update(storedToken);
+            _unitOfWork.RefreshTokens.Update(storedToken);
 
-            await _refreshTokenRepository.SaveChangesAsync();
+
+            await _unitOfWork.SaveChangesAsync();
 
             return response;
         }
@@ -129,7 +138,7 @@ namespace Application.Services.AuthService
         {
             var hash = _tokenService.Hash(input.RefreshToken);
 
-            var storedToken = await _refreshTokenRepository.GetAll()
+            var storedToken = await _unitOfWork.RefreshTokens.GetAll()
                 .FirstOrDefaultAsync(t => t.TokenHash == hash && t.RevokedAt == null);
 
             if (storedToken == null)
@@ -141,13 +150,14 @@ namespace Application.Services.AuthService
             storedToken.RevokedReason = RevokeReasons.Logout;
             storedToken.RevokedByIp = _currentUserService.IpAddress;
 
-            _refreshTokenRepository.Update(storedToken);
-            await _refreshTokenRepository.SaveChangesAsync();
+            _unitOfWork.RefreshTokens.Update(storedToken);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task LogoutAllAsync()
         {
             await _userSecurityService.RevokeUserTokensAsync(RequiredUserId(), RevokeReasons.LogoutAll);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task ChangePasswordAsync(ChangePasswordInputDto input)
@@ -157,9 +167,16 @@ namespace Application.Services.AuthService
                 throw new BadRequestException("New password and confirm new password do not match");
             }
 
+            var policy = _passwordPolicyFactory.Create();
+
+            if (!policy.IsValid(input.NewPassword))
+            {
+                throw new BadRequestException($"Weak password. {policy.Description}");
+            }
+
             var userId = RequiredUserId();
 
-            var user = await _userRepository.GetByIdAsync(userId)
+            var user = await _unitOfWork.Users.GetByIdAsync(userId)
                 ?? throw new NotFoundException("User", userId);
 
             var verification = _passwordHasher.VerifyHashedPassword(user, user.Password, input.OldPassword);
@@ -169,12 +186,12 @@ namespace Application.Services.AuthService
             }
 
             user.Password = _passwordHasher.HashPassword(user, input.NewPassword);
-            _userRepository.Update(user);
+            _unitOfWork.Users.Update(user);
 
             // Every other device has to sign in again with the new password.
-            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.PasswordChanged, saveChanges: false);
+            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.PasswordChanged);
 
-            await _userRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task<CurrentUserDto> GetCurrentUserAsync()
@@ -192,12 +209,12 @@ namespace Application.Services.AuthService
         {
             var userId = RequiredUserId();
 
-            var user = await _userRepository.GetByIdAsync(userId)
+            var user = await _unitOfWork.Users.GetByIdAsync(userId)
                 ?? throw new NotFoundException("User", userId);
 
             var email = input.Email.Trim();
 
-            var isEmailTaken = await _userRepository.GetAllReadOnly()
+            var isEmailTaken = await _unitOfWork.Users.GetAllReadOnly()
                 .AnyAsync(u => u.Email.ToLower() == email.ToLower() && u.Id != userId);
 
             if (isEmailTaken)
@@ -209,18 +226,19 @@ namespace Application.Services.AuthService
             user.Email = email;
             user.PhoneNumber = input.PhoneNumber?.Trim() ?? string.Empty;
 
-            _userRepository.Update(user);
-            await _userRepository.SaveChangesAsync();
+            _unitOfWork.Users.Update(user);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         private IQueryable<User> WithRolesAndPermissions()
         {
-            return _userRepository.GetAll()
+            return _unitOfWork.Users.GetAll()
                 .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
                     .ThenInclude(r => r.RolePermissions).ThenInclude(rp => rp.Permission);
         }
 
-        private async Task<AuthResponseDto> IssueTokensAsync(User user, RefreshToken? rotatedFrom = null, bool saveChanges = true)
+        // Only stages the new refresh token; committing is left to the caller.
+        private async Task<AuthResponseDto> IssueTokensAsync(User user, RefreshToken? rotatedFrom = null)
         {
             var roles = GetRoles(user);
             var permissions = GetPermissions(user);
@@ -228,16 +246,11 @@ namespace Application.Services.AuthService
             var accessToken = _tokenService.CreateAccessToken(user, roles, permissions);
             var refreshToken = _tokenService.CreateRefreshToken(user.Id, _currentUserService.IpAddress);
 
-            await _refreshTokenRepository.InsertAsync(refreshToken.Entity);
+            await _unitOfWork.RefreshTokens.InsertAsync(refreshToken.Entity);
 
             if (rotatedFrom != null)
             {
                 rotatedFrom.ReplacedByTokenHash = refreshToken.Entity.TokenHash;
-            }
-
-            if (saveChanges)
-            {
-                await _refreshTokenRepository.SaveChangesAsync();
             }
 
             return new AuthResponseDto
@@ -255,13 +268,13 @@ namespace Application.Services.AuthService
         {
             var threshold = DateTime.UtcNow.AddDays(-30);
 
-            var obsolete = await _refreshTokenRepository.GetAll()
+            var obsolete = await _unitOfWork.RefreshTokens.GetAll()
                 .Where(t => t.UserId == userId && (t.ExpiresAt < threshold || (t.RevokedAt != null && t.RevokedAt < threshold)))
                 .ToListAsync();
 
             if (obsolete.Count > 0)
             {
-                _refreshTokenRepository.DeleteRange(obsolete);
+                _unitOfWork.RefreshTokens.DeleteRange(obsolete);
             }
         }
 

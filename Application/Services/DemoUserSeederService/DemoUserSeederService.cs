@@ -8,12 +8,12 @@ namespace Application.Services.DemoUserSeederService
     // and the Hangfire recurring job demo, so both trigger the exact same insert.
     public class DemoUserSeederService : IDemoUserSeederService
     {
-        private readonly IGenericRepository<User> _userRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IPasswordHasher<User> _passwordHasher;
 
-        public DemoUserSeederService(IGenericRepository<User> userRepository, IPasswordHasher<User> passwordHasher)
+        public DemoUserSeederService(IUnitOfWork unitOfWork, IPasswordHasher<User> passwordHasher)
         {
-            _userRepository = userRepository;
+            _unitOfWork = unitOfWork;
             _passwordHasher = passwordHasher;
         }
 
@@ -31,8 +31,8 @@ namespace Application.Services.DemoUserSeederService
             };
             user.Password = _passwordHasher.HashPassword(user, "Demo@123");
 
-            await _userRepository.InsertAsync(user);
-            await _userRepository.SaveChangesAsync();
+            await _unitOfWork.Users.InsertAsync(user);
+            await _unitOfWork.SaveChangesAsync();
         }
     }
 }

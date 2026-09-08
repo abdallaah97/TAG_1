@@ -1,27 +1,26 @@
 using Application.Repositories;
 using Application.Services.CurrentUserService;
-using Domain.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace Application.Services.SecurityService
 {
     public class UserSecurityService : IUserSecurityService
     {
-        private readonly IGenericRepository<RefreshToken> _refreshTokenRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly ICurrentUserService _currentUserService;
 
         public UserSecurityService(
-            IGenericRepository<RefreshToken> refreshTokenRepository,
+            IUnitOfWork unitOfWork,
             ICurrentUserService currentUserService)
         {
-            _refreshTokenRepository = refreshTokenRepository;
+            _unitOfWork = unitOfWork;
             _currentUserService = currentUserService;
         }
 
-        public Task RevokeUserTokensAsync(int userId, string reason, bool saveChanges = true)
-            => RevokeUsersTokensAsync(new[] { userId }, reason, saveChanges);
+        public Task RevokeUserTokensAsync(int userId, string reason)
+            => RevokeUsersTokensAsync(new[] { userId }, reason);
 
-        public async Task RevokeUsersTokensAsync(IEnumerable<int> userIds, string reason, bool saveChanges = true)
+        public async Task RevokeUsersTokensAsync(IEnumerable<int> userIds, string reason)
         {
             var ids = userIds.Distinct().ToList();
             if (ids.Count == 0)
@@ -29,7 +28,7 @@ namespace Application.Services.SecurityService
                 return;
             }
 
-            var tokens = await _refreshTokenRepository.GetAll()
+            var tokens = await _unitOfWork.RefreshTokens.GetAll()
                 .Where(t => ids.Contains(t.UserId) && t.RevokedAt == null)
                 .ToListAsync();
 
@@ -48,12 +47,7 @@ namespace Application.Services.SecurityService
                 token.RevokedByIp = ip;
             }
 
-            _refreshTokenRepository.UpdateRange(tokens);
-
-            if (saveChanges)
-            {
-                await _refreshTokenRepository.SaveChangesAsync();
-            }
+            _unitOfWork.RefreshTokens.UpdateRange(tokens);
         }
     }
 }

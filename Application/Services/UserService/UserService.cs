@@ -1,38 +1,41 @@
 using Application.Common.Exceptions;
 using Application.Common.Models;
+using Application.Common.Security;
 using Application.Repositories;
 using Application.Services.CurrentUserService;
 using Application.Services.SecurityService;
 using Application.Services.UserService.DTOs;
+using Application.Services.UserService.Export;
 using Domain.Entities;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using System.Text;
 
 namespace Application.Services.UserService
 {
     public class UserService : IUserService
     {
-        private readonly IGenericRepository<User> _userRepository;
-        private readonly IGenericRepository<Role> _roleRepository;
-        private readonly IGenericRepository<UserRole> _userRoleRepository;
+        private readonly IUnitOfWork _unitOfWork;
         private readonly IUserSecurityService _userSecurityService;
         private readonly ICurrentUserService _currentUserService;
         private readonly IPasswordHasher<User> _passwordHasher;
+        private readonly IPasswordPolicyFactory _passwordPolicyFactory;
+        private readonly IUserExportStrategyFactory _exportFactory;
 
         public UserService(
-            IGenericRepository<User> userRepository,
-            IGenericRepository<Role> roleRepository,
-            IGenericRepository<UserRole> userRoleRepository,
+            IUnitOfWork unitOfWork,
             IUserSecurityService userSecurityService,
             ICurrentUserService currentUserService,
-            IPasswordHasher<User> passwordHasher)
+            IPasswordHasher<User> passwordHasher,
+            IPasswordPolicyFactory passwordPolicyFactory,
+            IUserExportStrategyFactory exportFactory)
         {
-            _userRepository = userRepository;
-            _roleRepository = roleRepository;
-            _userRoleRepository = userRoleRepository;
+            _unitOfWork = unitOfWork;
             _userSecurityService = userSecurityService;
             _currentUserService = currentUserService;
             _passwordHasher = passwordHasher;
+            _passwordPolicyFactory = passwordPolicyFactory;
+            _exportFactory = exportFactory;
         }
 
         public async Task<PagedResult<GetUserDto>> GetAllUsers(GetAllUsersInputDto input)
@@ -40,7 +43,7 @@ namespace Application.Services.UserService
             var pageNumber = input.PageNumber < 1 ? 1 : input.PageNumber;
             var pageSize = input.PageSize is < 1 or > 200 ? 20 : input.PageSize;
 
-            var query = _userRepository.GetAllReadOnly();
+            var query = _unitOfWork.Users.GetAllReadOnly().IgnoreQueryFilters();
 
             if (!string.IsNullOrWhiteSpace(input.Search))
             {
@@ -86,9 +89,23 @@ namespace Application.Services.UserService
             };
         }
 
+        public async Task<ExportFile> ExportUsers(GetAllUsersInputDto input, string format)
+        {
+            var strategy = _exportFactory.Create(format);
+
+            input.PageNumber = 1;
+            input.PageSize = 200;
+
+            var users = await GetAllUsers(input);
+
+            var content = Encoding.UTF8.GetBytes(strategy.Export(users.Items));
+
+            return new ExportFile(content, strategy.ContentType, strategy.FileName);
+        }
+
         public async Task<UserDetailsDto> GetUserById(int id)
         {
-            var user = await _userRepository.GetAllReadOnly()
+            var user = await _unitOfWork.Users.GetAllReadOnly()
                 .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
                     .ThenInclude(r => r.RolePermissions).ThenInclude(rp => rp.Permission)
                 .FirstOrDefaultAsync(u => u.Id == id)
@@ -115,9 +132,17 @@ namespace Application.Services.UserService
 
         public async Task<int> CreateUser(CreateUserDto input)
         {
+            // The factory picks the policy, the policy judges the password.
+            var policy = _passwordPolicyFactory.Create();
+
+            if (!policy.IsValid(input.Password))
+            {
+                throw new BadRequestException($"Weak password. {policy.Description}");
+            }
+
             var email = input.Email.Trim();
 
-            var isEmailTaken = await _userRepository.GetAllReadOnly()
+            var isEmailTaken = await _unitOfWork.Users.GetAllReadOnly()
                 .AnyAsync(u => u.Email.ToLower() == email.ToLower());
 
             if (isEmailTaken)
@@ -142,20 +167,20 @@ namespace Application.Services.UserService
                 .Select(role => new UserRole { RoleId = role.Id, AssignedAt = DateTime.UtcNow })
                 .ToList();
 
-            await _userRepository.InsertAsync(user);
-            await _userRepository.SaveChangesAsync();
+            await _unitOfWork.Users.InsertAsync(user);
+            await _unitOfWork.SaveChangesAsync();
 
             return user.Id;
         }
 
         public async Task UpdateUser(UpdateUserDto input)
         {
-            var user = await _userRepository.GetByIdAsync(input.Id)
+            var user = await _unitOfWork.Users.GetByIdAsync(input.Id)
                 ?? throw new NotFoundException("User", input.Id);
 
             var email = input.Email.Trim();
 
-            var isEmailTaken = await _userRepository.GetAllReadOnly()
+            var isEmailTaken = await _unitOfWork.Users.GetAllReadOnly()
                 .AnyAsync(u => u.Email.ToLower() == email.ToLower() && u.Id != input.Id);
 
             if (isEmailTaken)
@@ -167,13 +192,13 @@ namespace Application.Services.UserService
             user.Email = email;
             user.PhoneNumber = input.PhoneNumber?.Trim() ?? string.Empty;
 
-            _userRepository.Update(user);
-            await _userRepository.SaveChangesAsync();
+            _unitOfWork.Users.Update(user);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task DeleteUser(int id)
         {
-            var user = await _userRepository.GetAll()
+            var user = await _unitOfWork.Users.GetAll()
                 .Include(u => u.UserRoles)
                 .Include(u => u.RefreshTokens)
                 .FirstOrDefaultAsync(u => u.Id == id)
@@ -186,14 +211,14 @@ namespace Application.Services.UserService
 
             await GuardLastSuperAdminAsync(user, "The last super admin can not be deleted");
 
-            _userRoleRepository.DeleteRange(user.UserRoles);
-            _userRepository.Delete(user);
-            await _userRepository.SaveChangesAsync();
+            _unitOfWork.UserRoles.DeleteRange(user.UserRoles);
+            _unitOfWork.Users.Delete(user);
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task SetUserActiveState(int id, bool isActive)
         {
-            var user = await _userRepository.GetAll()
+            var user = await _unitOfWork.Users.GetAll()
                 .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
                 .FirstOrDefaultAsync(u => u.Id == id)
                 ?? throw new NotFoundException("User", id);
@@ -209,14 +234,14 @@ namespace Application.Services.UserService
             }
 
             user.IsActive = isActive;
-            _userRepository.Update(user);
+            _unitOfWork.Users.Update(user);
 
             if (!isActive)
             {
-                await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.UserDeactivated, saveChanges: false);
+                await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.UserDeactivated);
             }
 
-            await _userRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task ChangePasswordAsync(ChangeUserPasswordInputDto input)
@@ -226,20 +251,27 @@ namespace Application.Services.UserService
                 throw new BadRequestException("New password and confirm new password do not match");
             }
 
-            var user = await _userRepository.GetByIdAsync(input.UserId)
+            var policy = _passwordPolicyFactory.Create();
+
+            if (!policy.IsValid(input.NewPassword))
+            {
+                throw new BadRequestException($"Weak password. {policy.Description}");
+            }
+
+            var user = await _unitOfWork.Users.GetByIdAsync(input.UserId)
                 ?? throw new NotFoundException("User", input.UserId);
 
             user.Password = _passwordHasher.HashPassword(user, input.NewPassword);
-            _userRepository.Update(user);
+            _unitOfWork.Users.Update(user);
 
-            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.PasswordChanged, saveChanges: false);
+            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.PasswordChanged);
 
-            await _userRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task AssignRolesToUser(AssignRolesInputDto input)
         {
-            var user = await _userRepository.GetAll()
+            var user = await _unitOfWork.Users.GetAll()
                 .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
                 .FirstOrDefaultAsync(u => u.Id == input.UserId)
                 ?? throw new NotFoundException("User", input.UserId);
@@ -263,26 +295,26 @@ namespace Application.Services.UserService
                 return;
             }
 
-            _userRoleRepository.DeleteRange(removed);
+            _unitOfWork.UserRoles.DeleteRange(removed);
 
-            await _userRoleRepository.InsertRangeAsync(addedIds
+            await _unitOfWork.UserRoles.InsertRangeAsync(addedIds
                 .Select(roleId => new UserRole { UserId = user.Id, RoleId = roleId, AssignedAt = DateTime.UtcNow })
                 .ToList());
 
-            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.SecurityChanged, saveChanges: false);
+            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.SecurityChanged);
 
-            await _userRoleRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task AddRoleToUser(int userId, int roleId)
         {
-            var user = await _userRepository.GetAllReadOnly().FirstOrDefaultAsync(u => u.Id == userId)
+            var user = await _unitOfWork.Users.GetAllReadOnly().FirstOrDefaultAsync(u => u.Id == userId)
                 ?? throw new NotFoundException("User", userId);
 
-            _ = await _roleRepository.GetAllReadOnly().FirstOrDefaultAsync(r => r.Id == roleId)
+            _ = await _unitOfWork.Roles.GetAllReadOnly().FirstOrDefaultAsync(r => r.Id == roleId)
                 ?? throw new NotFoundException("Role", roleId);
 
-            var alreadyAssigned = await _userRoleRepository.GetAllReadOnly()
+            var alreadyAssigned = await _unitOfWork.UserRoles.GetAllReadOnly()
                 .AnyAsync(ur => ur.UserId == userId && ur.RoleId == roleId);
 
             if (alreadyAssigned)
@@ -290,21 +322,21 @@ namespace Application.Services.UserService
                 throw new ConflictException("The role is already assigned to this user");
             }
 
-            await _userRoleRepository.InsertAsync(new UserRole
+            await _unitOfWork.UserRoles.InsertAsync(new UserRole
             {
                 UserId = user.Id,
                 RoleId = roleId,
                 AssignedAt = DateTime.UtcNow
             });
 
-            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.SecurityChanged, saveChanges: false);
+            await _userSecurityService.RevokeUserTokensAsync(user.Id, RevokeReasons.SecurityChanged);
 
-            await _userRoleRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         public async Task RemoveRoleFromUser(int userId, int roleId)
         {
-            var userRole = await _userRoleRepository.GetAll()
+            var userRole = await _unitOfWork.UserRoles.GetAll()
                 .Include(ur => ur.Role)
                 .Include(ur => ur.User)
                 .FirstOrDefaultAsync(ur => ur.UserId == userId && ur.RoleId == roleId)
@@ -315,11 +347,11 @@ namespace Application.Services.UserService
                 await GuardLastSuperAdminAsync(userRole.User, "The last super admin can not lose the super admin role");
             }
 
-            _userRoleRepository.Delete(userRole);
+            _unitOfWork.UserRoles.Delete(userRole);
 
-            await _userSecurityService.RevokeUserTokensAsync(userId, RevokeReasons.SecurityChanged, saveChanges: false);
+            await _userSecurityService.RevokeUserTokensAsync(userId, RevokeReasons.SecurityChanged);
 
-            await _userRoleRepository.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         private async Task<List<Role>> LoadRolesAsync(List<int> roleIds)
@@ -330,7 +362,7 @@ namespace Application.Services.UserService
                 return new List<Role>();
             }
 
-            var roles = await _roleRepository.GetAllReadOnly()
+            var roles = await _unitOfWork.Roles.GetAllReadOnly()
                 .Where(r => ids.Contains(r.Id))
                 .ToListAsync();
 
@@ -346,7 +378,7 @@ namespace Application.Services.UserService
         // The system must never end up without a single active super admin.
         private async Task GuardLastSuperAdminAsync(User user, string message)
         {
-            var isSuperAdmin = await _userRoleRepository.GetAllReadOnly()
+            var isSuperAdmin = await _unitOfWork.UserRoles.GetAllReadOnly()
                 .AnyAsync(ur => ur.UserId == user.Id && ur.Role.Name == SystemRoles.SuperAdmin);
 
             if (!isSuperAdmin)
@@ -354,7 +386,7 @@ namespace Application.Services.UserService
                 return;
             }
 
-            var otherSuperAdmins = await _userRoleRepository.GetAllReadOnly()
+            var otherSuperAdmins = await _unitOfWork.UserRoles.GetAllReadOnly()
                 .CountAsync(ur => ur.Role.Name == SystemRoles.SuperAdmin && ur.UserId != user.Id && ur.User.IsActive);
 
             if (otherSuperAdmins == 0)
