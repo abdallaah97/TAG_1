@@ -1,4 +1,4 @@
-using API.BackgroundServices;
+﻿using API.BackgroundServices;
 using API.Middleware;
 using Application.Common.Security;
 using Application.Common.Settings;
@@ -112,10 +112,13 @@ builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddSingleton<IPasswordPolicyFactory, PasswordPolicyFactory>();
 builder.Services.AddSingleton<IUserExportStrategyFactory, UserExportStrategyFactory>();
 
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+                     ?? throw new InvalidOperationException("The Cors:AllowedOrigins section is missing from the configuration.");
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("CorsPolicy", policy => policy
-        .SetIsOriginAllowed((host) => true)
+        .WithOrigins(allowedOrigins)
         .AllowAnyMethod()
         .AllowAnyHeader()
         .AllowCredentials());

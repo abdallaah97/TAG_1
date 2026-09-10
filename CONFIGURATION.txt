@@ -1,0 +1,127 @@
+================================================================================
+SECRETS AND ENVIRONMENT VARIABLES
+================================================================================
+
+The idea in one line:
+appsettings.json holds the KEY with an empty value, the real value comes from
+somewhere else, and the code never knows the difference.
+
+
+--------------------------------------------------------------------------------
+1. ADD A SECRET (your machine)
+--------------------------------------------------------------------------------
+
+Once per project:
+
+    dotnet user-secrets init --project API/API.csproj
+
+Then, one line per secret:
+
+    dotnet user-secrets set "Jwt:Key" "my-real-key" --project API/API.csproj
+    dotnet user-secrets set "ConnectionStrings:Default" "Server=...;Database=TAG;..." --project API/API.csproj
+
+See what you stored:
+
+    dotnet user-secrets list --project API/API.csproj
+
+It is saved outside the repo, so it can never be committed.
+It works in Development only.
+
+
+--------------------------------------------------------------------------------
+2. READ IT
+--------------------------------------------------------------------------------
+
+Nothing special. Same as any other setting:
+
+    builder.Configuration["Jwt:Key"]
+    builder.Configuration.GetConnectionString("Default")
+    builder.Configuration.GetSection("Jwt").Get<JwtSettings>()
+
+Inside a service, inject IConfiguration or IOptions<JwtSettings>.
+
+
+--------------------------------------------------------------------------------
+3. ADD AN ENVIRONMENT VARIABLE (servers)
+--------------------------------------------------------------------------------
+
+Same key, but the colon becomes two underscores:
+
+    Jwt:Key         ->   Jwt__Key
+    ConnectionStrings:Default  ->  ConnectionStrings__Default
+
+Set it:
+
+    PowerShell        $env:Jwt__Key = "my-real-key"
+    Linux             export Jwt__Key="my-real-key"
+    Docker            docker run -e Jwt__Key=my-real-key image
+
+Read it in code exactly like section 2. No change.
+
+
+--------------------------------------------------------------------------------
+4. WHO WINS
+--------------------------------------------------------------------------------
+
+All the providers are loaded into ONE dictionary, in this order. Each one
+overwrites the one above it, so the bottom of the list wins:
+
+    appsettings.json                                       weakest
+    appsettings.Development.json / appsettings.Production.json
+    user secrets
+    environment variables
+    command line          dotnet run -- --Jwt:Key=...      strongest
+
+Same key in all three:
+
+    appsettings.json         Jwt:Key = AAA     ignored
+    user secrets             Jwt:Key = BBB     ignored
+    environment variable     Jwt__Key = CCC    this is what you get
+
+That is why the call is always the same. There is only one dictionary at the
+end, and the code reads the final result.
+
+On a server user secrets are not loaded at all, so it is appsettings.json
+against environment variables.
+
+
+IT OVERRIDES PER KEY, NOT PER SECTION
+
+    "Jwt": { "Key": "AAA", "Issuer": "TAG", "Audience": "TAGUsers" }
+
+Setting the environment variable Jwt__Key overrides Jwt:Key alone. Issuer and
+Audience still come from appsettings.json. The section is not replaced.
+
+Same reason arrays behave badly: Cors:AllowedOrigins:0 and :1 are two separate
+keys. Override :0 only, and :1 survives from the JSON file.
+
+
+HOW TO SEE WHICH PROVIDER WON
+
+Temporarily, in API/Program.cs after builder.Build():
+
+    Console.WriteLine(((IConfigurationRoot)builder.Configuration).GetDebugView());
+
+It prints every key with the provider that won it:
+
+    Jwt:Key=CCC (EnvironmentVariablesConfigurationProvider Prefix: '')
+    Jwt:Issuer=TAG (JsonConfigurationProvider for 'appsettings.json' (Optional))
+    Seed:SuperAdmin:Password=xyz (JsonConfigurationProvider for 'secrets.json')
+
+Remove it before committing, it prints every secret to the console.
+
+
+--------------------------------------------------------------------------------
+5. THE ONLY RULES
+--------------------------------------------------------------------------------
+
+    Never put a real secret in appsettings.json. It is committed to git.
+    Keep the key, empty the value.
+
+    Local  -> user-secrets
+    Server -> environment variables
+
+    Secret keys in this project:
+      ConnectionStrings:Default
+      Jwt:Key
+      Seed:SuperAdmin:Password
