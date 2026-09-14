@@ -1,5 +1,6 @@
 using Application.Common.Exceptions;
 using Application.Repositories;
+using Application.Services.CacheService;
 using Application.Services.RoleService.DTOs;
 using Application.Services.SecurityService;
 using Domain.Entities;
@@ -11,56 +12,36 @@ namespace Application.Services.RoleService
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IUserSecurityService _userSecurityService;
+        private readonly ICacheService _cacheService;
 
         public RoleService(
             IUnitOfWork unitOfWork,
-            IUserSecurityService userSecurityService)
+            IUserSecurityService userSecurityService,
+            ICacheService cacheService)
         {
             _unitOfWork = unitOfWork;
             _userSecurityService = userSecurityService;
+            _cacheService = cacheService;
         }
 
         public async Task<List<GetRoleDto>> GetAllRoles(GetAllRolesInputDto input)
         {
-            var query = _unitOfWork.Roles.GetAllReadOnly()
-                .Include(x => x.RolePermissions)
-                .ThenInclude(x => x.Permission).AsQueryable();
+            var roles = await GetCachedRolesAsync();
 
             if (!string.IsNullOrWhiteSpace(input.Search))
             {
                 var search = input.Search.Trim();
-                query = query.Where(r => r.Name.Contains(search));
+                roles = roles.Where(r => r.Name.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList();
             }
 
-            return await query
-                .OrderByDescending(r => r.IsSystemRole)
-                .ThenBy(r => r.Name)
-                .Select(r => new GetRoleDto
-                {
-                    Id = r.Id,
-                    Name = r.Name,
-                    Description = r.Description,
-                    IsSystemRole = r.IsSystemRole,
-                    CreatedAt = r.CreatedAt,
-                    UsersCount = r.UserRoles.Count,
-                    PermissionsCount = r.RolePermissions.Count,
-                    Permissions = r.RolePermissions.Select(x => new PermissionDto
-                    {
-                        Id = x.PermissionId,
-                        Name = x.Permission.Name,
-                        DisplayName = x.Permission.DisplayName,
-                        Group = x.Permission.Group
-                    }).ToList()
-                })
-                .ToListAsync();
+            return roles;
         }
 
         public async Task<RoleDetailsDto> GetRoleById(int id)
         {
-            var role = await _unitOfWork.Roles.GetAllReadOnly()
-                .Include(r => r.RolePermissions).ThenInclude(rp => rp.Permission)
-                .Include(r => r.UserRoles)
-                .FirstOrDefaultAsync(r => r.Id == id)
+            var roles = await GetCachedRolesAsync();
+
+            var role = roles.FirstOrDefault(r => r.Id == id)
                 ?? throw new NotFoundException("Role", id);
 
             return new RoleDetailsDto
@@ -70,10 +51,9 @@ namespace Application.Services.RoleService
                 Description = role.Description,
                 IsSystemRole = role.IsSystemRole,
                 CreatedAt = role.CreatedAt,
-                UsersCount = role.UserRoles.Count,
-                PermissionsCount = role.RolePermissions.Count,
-                Permissions = role.RolePermissions
-                    .Select(rp => MapPermission(rp.Permission))
+                UsersCount = role.UsersCount,
+                PermissionsCount = role.PermissionsCount,
+                Permissions = role.Permissions
                     .OrderBy(p => p.Group).ThenBy(p => p.Name)
                     .ToList()
             };
@@ -109,6 +89,8 @@ namespace Application.Services.RoleService
             await _unitOfWork.Roles.InsertAsync(role);
             await _unitOfWork.SaveChangesAsync();
 
+            await RefreshRolesCacheAsync();
+
             return role.Id;
         }
 
@@ -140,6 +122,8 @@ namespace Application.Services.RoleService
 
             _unitOfWork.Roles.Update(role);
             await _unitOfWork.SaveChangesAsync();
+
+            await RefreshRolesCacheAsync();
         }
 
         public async Task DeleteRole(int id)
@@ -163,6 +147,8 @@ namespace Application.Services.RoleService
             _unitOfWork.RolePermissions.DeleteRange(role.RolePermissions);
             _unitOfWork.Roles.Delete(role);
             await _unitOfWork.SaveChangesAsync();
+
+            await RefreshRolesCacheAsync();
         }
 
         public async Task<List<PermissionGroupDto>> GetAllPermissions()
@@ -183,19 +169,14 @@ namespace Application.Services.RoleService
 
         public async Task<List<PermissionDto>> GetRolePermissions(int roleId)
         {
-            await EnsureRoleExistsAsync(roleId);
+            var roles = await GetCachedRolesAsync();
 
-            return await _unitOfWork.RolePermissions.GetAllReadOnly()
-                .Where(rp => rp.RoleId == roleId)
-                .OrderBy(rp => rp.Permission.Group).ThenBy(rp => rp.Permission.Id)
-                .Select(rp => new PermissionDto
-                {
-                    Id = rp.Permission.Id,
-                    Name = rp.Permission.Name,
-                    DisplayName = rp.Permission.DisplayName,
-                    Group = rp.Permission.Group
-                })
-                .ToListAsync();
+            var role = roles.FirstOrDefault(r => r.Id == roleId)
+                ?? throw new NotFoundException("Role", roleId);
+
+            return role.Permissions
+                .OrderBy(p => p.Group).ThenBy(p => p.Id)
+                .ToList();
         }
 
         public async Task UpdateRolePermissions(UpdateRolePermissionsDto input)
@@ -236,6 +217,8 @@ namespace Application.Services.RoleService
 
             // The changed grants and the sessions they invalidate land in one commit.
             await _unitOfWork.SaveChangesAsync();
+
+            await RefreshRolesCacheAsync();
         }
 
         public async Task AddPermissionToRole(int roleId, string permission)
@@ -268,6 +251,8 @@ namespace Application.Services.RoleService
             await RevokeSessionsOfRoleAsync(roleId);
 
             await _unitOfWork.SaveChangesAsync();
+
+            await RefreshRolesCacheAsync();
         }
 
         public async Task RemovePermissionFromRole(int roleId, string permission)
@@ -291,6 +276,8 @@ namespace Application.Services.RoleService
             await RevokeSessionsOfRoleAsync(roleId);
 
             await _unitOfWork.SaveChangesAsync();
+
+            await RefreshRolesCacheAsync();
         }
 
         public async Task<List<RoleUserDto>> GetRoleUsers(int roleId)
@@ -306,6 +293,52 @@ namespace Application.Services.RoleService
                     Name = ur.User.Name,
                     Email = ur.User.Email,
                     IsActive = ur.User.IsActive
+                })
+                .ToListAsync();
+        }
+
+        private async Task<List<GetRoleDto>> GetCachedRolesAsync()
+        {
+            var cached = await _cacheService.GetAsync<List<GetRoleDto>>(CacheKeys.Roles);
+
+            if (cached is not null)
+            {
+                return cached;
+            }
+
+            return await RefreshRolesCacheAsync();
+        }
+
+        private async Task<List<GetRoleDto>> RefreshRolesCacheAsync()
+        {
+            var roles = await LoadRolesFromDatabaseAsync();
+
+            await _cacheService.SetAsync(CacheKeys.Roles, roles, CacheKeys.RolesExpiration);
+
+            return roles;
+        }
+
+        private async Task<List<GetRoleDto>> LoadRolesFromDatabaseAsync()
+        {
+            return await _unitOfWork.Roles.GetAllReadOnly()
+                .OrderByDescending(r => r.IsSystemRole)
+                .ThenBy(r => r.Name)
+                .Select(r => new GetRoleDto
+                {
+                    Id = r.Id,
+                    Name = r.Name,
+                    Description = r.Description,
+                    IsSystemRole = r.IsSystemRole,
+                    CreatedAt = r.CreatedAt,
+                    UsersCount = r.UserRoles.Count,
+                    PermissionsCount = r.RolePermissions.Count,
+                    Permissions = r.RolePermissions.Select(x => new PermissionDto
+                    {
+                        Id = x.PermissionId,
+                        Name = x.Permission.Name,
+                        DisplayName = x.Permission.DisplayName,
+                        Group = x.Permission.Group
+                    }).ToList()
                 })
                 .ToListAsync();
         }

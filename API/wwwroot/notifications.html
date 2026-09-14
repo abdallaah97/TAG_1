@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SignalR Notifications</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #f4f5f7; color: #1c1d21; }
+        .wrap { max-width: 760px; margin: 0 auto; }
+        .card { background: #fff; border: 1px solid #e2e4e9; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        h2 { margin: 0 0 12px; font-size: 16px; }
+        label { display: block; font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+        input, select { width: 100%; padding: 8px; border: 1px solid #cfd3da; border-radius: 6px; font-size: 14px; }
+        .row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .row > div { flex: 1; min-width: 140px; }
+        button { padding: 8px 14px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        .status { font-size: 13px; padding: 8px 12px; border-radius: 6px; background: #eef2ff; margin-bottom: 16px; }
+        .feed { list-style: none; margin: 0; padding: 0; }
+        .feed li { border-left: 3px solid #2563eb; background: #f9fafb; padding: 8px 12px; margin-bottom: 8px; border-radius: 4px; }
+        .feed .meta { font-size: 11px; color: #6b7280; margin-top: 4px; }
+        .hide { display: none; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1 style="font-size:20px;margin:0 0 16px">SignalR Notifications</h1>
+
+    <div id="status" class="status">Not connected</div>
+
+    <div id="loginCard" class="card">
+        <h2>1. Login</h2>
+        <div class="row">
+            <div>
+                <label>Email</label>
+                <input id="email" value="admin@tag.com" />
+            </div>
+            <div>
+                <label>Password</label>
+                <input id="password" type="password" value="Admin@123" />
+            </div>
+        </div>
+        <br />
+        <button id="loginBtn">Login and connect</button>
+    </div>
+
+    <div id="sendCard" class="card hide">
+        <h2>2. Send</h2>
+        <div class="row">
+            <div>
+                <label>To user id</label>
+                <input id="targetUserId" type="number" value="1" />
+            </div>
+            <div>
+                <label>Message</label>
+                <input id="userMessage" value="Hello, this one is only for you." />
+            </div>
+            <div style="flex:0 0 auto;align-self:flex-end">
+                <button id="sendUserBtn">Send to user</button>
+            </div>
+        </div>
+        <br />
+        <div class="row">
+            <div>
+                <label>To role</label>
+                <select id="targetRole">
+                    <option>SuperAdmin</option>
+                    <option>Admin</option>
+                    <option>User</option>
+                </select>
+            </div>
+            <div>
+                <label>Message</label>
+                <input id="roleMessage" value="Everyone in this role gets this." />
+            </div>
+            <div style="flex:0 0 auto;align-self:flex-end">
+                <button id="sendRoleBtn">Send to role</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>3. Incoming</h2>
+        <ul id="feed" class="feed"></ul>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+<script>
+    const status = document.getElementById("status");
+    const feed = document.getElementById("feed");
+    let token = null;
+    let connection = null;
+
+    function setStatus(text) {
+        status.textContent = text;
+    }
+
+    function add(title, detail) {
+        const li = document.createElement("li");
+        li.innerHTML = `<strong></strong><div class="meta"></div>`;
+        li.querySelector("strong").textContent = title;
+        li.querySelector(".meta").textContent = detail;
+        feed.prepend(li);
+    }
+
+    async function login() {
+        const res = await fetch("/api/Auth/Login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                username: document.getElementById("email").value,
+                password: document.getElementById("password").value
+            })
+        });
+
+        if (!res.ok) {
+            setStatus("Login failed: " + res.status);
+            return;
+        }
+
+        const data = await res.json();
+        token = data.accessToken;
+        setStatus(`Logged in as ${data.user.name} (id ${data.user.id}) - roles: ${data.user.roles.join(", ") || "none"}`);
+        document.getElementById("loginCard").classList.add("hide");
+        document.getElementById("sendCard").classList.remove("hide");
+        await connect();
+    }
+
+    async function connect() {
+        connection = new signalR.HubConnectionBuilder()
+            .withUrl("/hubs/notifications", { accessTokenFactory: () => token })
+            .withAutomaticReconnect()
+            .build();
+
+        connection.on("Connected", info => {
+            setStatus(`${status.textContent} | connected, groups: ${info.groups.join(", ") || "none"}`);
+            add("Connected to hub", `user id ${info.userId} - groups: ${info.groups.join(", ") || "none"}`);
+        });
+
+        connection.on("ReceiveNotification", n => {
+            add(n.message, `to ${n.target} - from ${n.sender} - ${new Date(n.sentAt).toLocaleTimeString()}`);
+        });
+
+        connection.onreconnecting(() => setStatus("Reconnecting..."));
+        connection.onclose(() => setStatus("Disconnected"));
+
+        await connection.start();
+    }
+
+    async function send(url, message) {
+        const res = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token
+            },
+            body: JSON.stringify({ message })
+        });
+
+        if (!res.ok) {
+            add("Send failed", `${url} returned ${res.status}`);
+        }
+    }
+
+    document.getElementById("loginBtn").onclick = login;
+
+    document.getElementById("sendUserBtn").onclick = () =>
+        send(`/api/Notifications/SendToUser/${document.getElementById("targetUserId").value}`,
+             document.getElementById("userMessage").value);
+
+    document.getElementById("sendRoleBtn").onclick = () =>
+        send(`/api/Notifications/SendToRole/${document.getElementById("targetRole").value}`,
+             document.getElementById("roleMessage").value);
+</script>
+</body>
+</html>

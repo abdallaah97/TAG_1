@@ -1,0 +1,214 @@
+================================================================================
+REDIS CACHE
+================================================================================
+
+The idea in one line:
+the role list lives in Redis under one key for 24 hours, every read hits Redis
+first, and every write to a role rewrites that key straight away.
+
+
+--------------------------------------------------------------------------------
+1. INSTALL IT (Windows, command line)
+--------------------------------------------------------------------------------
+
+Open PowerShell or cmd AS ADMINISTRATOR.
+
+    choco install redis -y
+
+It puts redis-server.exe and redis-cli.exe in
+
+    C:\Program Files\Redis
+
+and registers a Windows service called "Redis" that starts with the machine.
+Nothing else to configure.
+
+Without chocolatey:
+
+    Docker    docker run -d --name redis -p 6379:6379 redis
+    WSL       wsl --install
+              sudo apt install redis-server
+              sudo service redis-server start
+
+
+--------------------------------------------------------------------------------
+2. IS IT RUNNING
+--------------------------------------------------------------------------------
+
+Three checks, from the fastest to the most certain.
+
+The service:
+
+    sc query Redis
+    Get-Service Redis          (PowerShell)
+
+    STATE : 4  RUNNING         -> good
+
+The port:
+
+    netstat -ano | findstr 6379
+
+    TCP  0.0.0.0:6379  LISTENING    -> good
+
+Redis itself:
+
+    redis-cli ping
+
+    PONG                       -> good, and this is the only one of the three
+                                  that proves Redis actually answers
+
+If redis-cli is not recognised it is simply not on the PATH, use the full path:
+
+    "C:\Program Files\Redis\redis-cli.exe" ping
+
+Start and stop it:
+
+    net start Redis
+    net stop Redis
+
+
+--------------------------------------------------------------------------------
+3. THE CONNECTION
+--------------------------------------------------------------------------------
+
+appsettings.json:
+
+    "ConnectionStrings": {
+      "Default": "Server=...;Database=TAG;...",
+      "Redis": "localhost:6379"
+    }
+
+API/Program.cs:
+
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = builder.Configuration.GetConnectionString("Redis");
+        options.InstanceName = "TAG:";
+    });
+
+    builder.Services.AddScoped<ICacheService, RedisCacheService>();
+
+Package:  Microsoft.Extensions.Caching.StackExchangeRedis   (API.csproj)
+
+InstanceName is a prefix glued in front of every key, nothing more. The code
+asks for the key "roles", Redis stores it as "TAG:roles". It keeps this
+project's keys apart from anything else sharing the same Redis.
+
+Other shapes of the connection string:
+
+    localhost:6379                              local, no password
+    localhost:6379,password=abc123              with a password
+    my-server:6379,password=abc123,ssl=True     remote
+    localhost:6379,defaultDatabase=1            database 1 instead of 0
+
+On a server keep the value empty in appsettings.json and pass it as the
+environment variable  ConnectionStrings__Redis  -- see CONFIGURATION.txt.
+
+
+--------------------------------------------------------------------------------
+4. FIVE COMMANDS
+--------------------------------------------------------------------------------
+
+Open the client from cmd:
+
+    redis-cli
+
+The prompt turns into  127.0.0.1:6379>  and everything below is typed there.
+Type  exit  to leave. A single command can also be run without going in:
+
+    redis-cli KEYS "TAG:*"
+
+
+1. KEYS -- list what is stored
+
+    KEYS *              every key
+    KEYS TAG:*          only this project
+
+    1) "TAG:roles"
+
+
+2. TTL and TYPE -- how long it lives, and what it is
+
+    TTL  TAG:roles      86391   seconds left, 24h is 86400
+                        -1      the key has no expiry
+                        -2      the key does not exist
+
+    TYPE TAG:roles      hash
+
+
+3. HGETALL -- read the value
+
+    The cache stores a HASH, not a plain string, so GET fails on it with
+    WRONGTYPE. The JSON sits in the field "data":
+
+    HGETALL TAG:roles       -> absexp, sldexp, data
+    HGET TAG:roles data     -> [{"id":1,"name":"SuperAdmin", ... }]
+
+
+4. DEL -- throw the key away
+
+    DEL TAG:roles
+
+    The next call to GetAllRoles finds nothing, reads the database, and writes
+    the key back with a fresh 24 hours. This is how you test the cache.
+
+
+5. DBSIZE and FLUSHDB -- the whole database
+
+    DBSIZE              how many keys are in there
+    FLUSHDB             delete every key in the current database
+    FLUSHALL            delete every key in every database
+
+
+   A sixth one worth knowing: MONITOR prints every command Redis receives,
+   live. Run it in a second window, call the API, and you watch the project
+   talk to Redis. Ctrl+C stops it.
+
+
+--------------------------------------------------------------------------------
+5. HOW IT WORKS IN THIS PROJECT
+--------------------------------------------------------------------------------
+
+    Key       TAG:roles
+    Value     the whole role list as JSON, each role with its permissions
+    Expiry    24 hours, absolute
+
+READ    GetAllRoles / GetRoleById / GetRolePermissions
+
+        ask Redis
+          hit   -> return it, the database is never touched
+          miss  -> read the database, write TAG:roles with 24h, return it
+
+WRITE   CreateRole / UpdateRole / DeleteRole
+        UpdateRolePermissions / AddPermissionToRole / RemovePermissionFromRole
+
+        save to the database
+          -> reload the list and overwrite TAG:roles with a fresh 24 hours
+
+So the key never goes stale. A write does not only drop it, it rewrites it.
+
+The search in GetAllRoles filters the cached list in memory, so ?search=admin
+does not reach the database either.
+
+Files:
+
+    Application/Services/CacheService/ICacheService.cs           the contract
+    Application/Services/CacheService/CacheKeys.cs              the key and 24h
+    Infrastructure/Services/CacheService/RedisCacheService.cs   JSON in, JSON out
+    Application/Services/RoleService/RoleService.cs             the one using it
+
+One thing to be aware of: there is no fallback. If Redis is down the request
+fails instead of quietly going to the database. Keep the service running.
+
+
+--------------------------------------------------------------------------------
+6. SEE IT WITH YOUR OWN EYES
+--------------------------------------------------------------------------------
+
+    redis-cli DEL TAG:roles           the cache is now empty
+    GET  /api/Roles/GetAllRoles       from swagger
+    redis-cli KEYS TAG:*              TAG:roles is back
+    redis-cli TTL TAG:roles           around 86400
+
+    PUT  /api/Roles/UpdateRole        rename a role
+    redis-cli HGET TAG:roles data     the new name is already in there
+    redis-cli TTL TAG:roles           back to around 86400

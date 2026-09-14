@@ -1,11 +1,14 @@
 ﻿using API.BackgroundServices;
+using API.Hubs;
 using API.Middleware;
 using Application.Common.Security;
 using Application.Common.Settings;
 using Application.Repositories;
 using Application.Services.AuthService;
+using Application.Services.CacheService;
 using Application.Services.CurrentUserService;
 using Application.Services.DemoUserSeederService;
+using Application.Services.NotificationService;
 using Application.Services.RoleService;
 using Application.Services.SecurityService;
 using Application.Services.TokenService;
@@ -19,6 +22,7 @@ using Infrastructure.Repositories;
 using Infrastructure.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
@@ -66,9 +70,28 @@ builder.Services.AddAuthentication(options =>
         // Without this an expired token still passes for five more minutes.
         ClockSkew = TimeSpan.Zero
     };
+
+    options.Events = new JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            var accessToken = context.Request.Query["access_token"];
+
+            if (!string.IsNullOrEmpty(accessToken) && context.Request.Path.StartsWithSegments("/hubs"))
+            {
+                context.Token = accessToken;
+            }
+
+            return Task.CompletedTask;
+        }
+    };
 });
 
 builder.Services.AddAuthorization();
+
+builder.Services.AddSignalR();
+
+builder.Services.AddSingleton<IUserIdProvider, NotificationUserIdProvider>();
 
 builder.Services.AddEndpointsApiExplorer();
 
@@ -98,6 +121,15 @@ builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddMemoryCache();
 
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("Redis")
+                            ?? throw new InvalidOperationException("The ConnectionStrings:Redis value is missing from the configuration.");
+    options.InstanceName = "TAG:";
+});
+
+builder.Services.AddScoped<ICacheService, RedisCacheService>();
+
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
@@ -106,6 +138,7 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IRoleService, RoleService>();
 builder.Services.AddScoped<IDemoUserSeederService, DemoUserSeederService>();
+builder.Services.AddScoped<INotificationPublisher, SignalRNotificationPublisher>();
 builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
 
 
@@ -118,7 +151,8 @@ var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("CorsPolicy", policy => policy
-        .WithOrigins(allowedOrigins)
+        //.WithOrigins(allowedOrigins)
+        .SetIsOriginAllowed((host) => true)
         .AllowAnyMethod()
         .AllowAnyHeader()
         .AllowCredentials());
@@ -165,5 +199,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+app.MapHub<NotificationHub>("/hubs/notifications");
 
 app.Run();
