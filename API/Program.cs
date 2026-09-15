@@ -189,7 +189,7 @@ app.UseHangfireDashboard();
 RecurringJob.AddOrUpdate<IDemoUserSeederService>(
     "demo-add-user-hangfire",
     service => service.AddRandomUserAsync(),
-    "*/30 * * * *");
+    "0 0 * * *");
 
 app.UseCors("CorsPolicy");
 
