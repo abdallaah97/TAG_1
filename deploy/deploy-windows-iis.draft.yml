@@ -1,10 +1,10 @@
-name: Deploy API - Windows Server (draft)
+name: Deploy API - Windows Server IIS (draft)
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-api-windows
+  group: deploy-api-iis
   cancel-in-progress: false
 
 jobs:
@@ -54,11 +54,13 @@ jobs:
 
       - name: Publish
         run: |
-          dotnet publish API/API.csproj \
-            -c Release \
-            -r win-x64 \
-            --self-contained true \
-            -o publish
+          dotnet publish API/API.csproj -c Release -o publish
+
+          if [ ! -f publish/web.config ]; then
+            echo "web.config was not generated - IIS cannot host this output"
+            exit 1
+          fi
+
           cd publish && zip -qr ../release.zip . && cd ..
           ls -lh release.zip
 
@@ -68,34 +70,39 @@ jobs:
       - name: Upload
         run: sshpass -e scp $SSH_OPTS release.zip "$TARGET:release.zip"
 
-      - name: Stop, swap, start
+      - name: Swap behind app_offline
         run: |
           sshpass -e ssh $SSH_OPTS "$TARGET" "powershell -NoProfile -Command -" <<'PS'
           $ErrorActionPreference = 'Stop'
 
-          $app     = 'C:\apps\tag-api'
-          $service = 'tag-api'
+          $site    = 'C:\inetpub\tag-api'
           $archive = Join-Path $env:USERPROFILE 'release.zip'
+          $offline = Join-Path $site 'app_offline.htm'
 
-          if (Get-Service -Name $service -ErrorAction SilentlyContinue) {
-              Stop-Service -Name $service -Force
-              (Get-Service $service).WaitForStatus('Stopped', '00:01:00')
+          New-Item -ItemType Directory -Path $site -Force | Out-Null
+
+          try {
+              Set-Content -Path $offline -Encoding UTF8 -Value '<html><body><h1>Deploying</h1></body></html>'
+              Start-Sleep -Seconds 3
+
+              Get-ChildItem -Path $site -Force |
+                  Where-Object { $_.Name -ne 'app_offline.htm' } |
+                  Remove-Item -Recurse -Force
+
+              Expand-Archive -Path $archive -DestinationPath $site -Force
+              Remove-Item $archive -Force
+          }
+          finally {
+              if (Test-Path $offline) { Remove-Item $offline -Force }
           }
 
-          New-Item -ItemType Directory -Path $app -Force | Out-Null
-          Get-ChildItem -Path $app -Force | Remove-Item -Recurse -Force
-
-          Expand-Archive -Path $archive -DestinationPath $app -Force
-          Remove-Item $archive -Force
-
-          Start-Service -Name $service
-          Write-Output "service state: $((Get-Service $service).Status)"
+          Write-Output "files in place at $site"
           PS
 
       - name: Health check
         run: |
           sshpass -e ssh $SSH_OPTS "$TARGET" "powershell -NoProfile -Command -" <<'PS'
-          $url = 'http://127.0.0.1:5080/swagger/index.html'
+          $url = 'http://localhost/swagger/index.html'
 
           foreach ($i in 1..30) {
               try {
@@ -113,7 +120,11 @@ jobs:
           }
 
           Write-Output 'API did not respond'
-          Get-EventLog -LogName Application -Source 'tag-api' -Newest 20 -ErrorAction SilentlyContinue |
-              Format-List TimeGenerated, EntryType, Message
+
+          Get-WinEvent -LogName Application -MaxEvents 30 -ErrorAction SilentlyContinue |
+              Where-Object { $_.ProviderName -like '*AspNetCore*' -or $_.ProviderName -like '*IIS*' } |
+              Select-Object -First 10 TimeCreated, ProviderName, Message |
+              Format-List
+
           exit 1
           PS
