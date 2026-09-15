@@ -70,5 +70,12 @@ namespace API.Controllers
             await _authService.UpdateProfileAsync(input);
             return Ok();
         }
+
+        [Authorize]
+        [HttpPut("TestDeployment")]
+        public async Task<IActionResult> TestDeployment()
+        {
+            return Ok();
+        }
     }
 }
