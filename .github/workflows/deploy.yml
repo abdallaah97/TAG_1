@@ -5,8 +5,42 @@ on:
     branches: [deploy]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
 jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore API/API.csproj
+
+      - name: Build
+        run: dotnet build API/API.csproj -c Release --no-restore
+
+      - name: Test
+        run: |
+          projects=$(find . -name "*.csproj" -not -path "*/bin/*" -not -path "*/obj/*" \
+            -exec grep -l "Microsoft.NET.Test.Sdk" {} + 2>/dev/null || true)
+          if [ -z "$projects" ]; then
+            echo "no test projects in the solution yet - nothing to run"
+            exit 0
+          fi
+          for p in $projects; do
+            echo "::group::$p"
+            dotnet test "$p" -c Release
+            echo "::endgroup::"
+          done
+
   deploy:
+    needs: ci
     runs-on: ubuntu-latest
     env:
       SSHPASS: ${{ secrets.SERVER_PASSWORD }}
