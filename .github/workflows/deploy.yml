@@ -16,10 +16,19 @@ jobs:
       SRV_HOST: ${{ secrets.SERVER_HOST }}
       SRV_USER: ${{ secrets.SERVER_USERNAME }}
       SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+      APP_ROOT: /var/www/tag
       APP_DIR: /var/www/tag/tag-api
       BUILD_DIR: /var/www/tag/build
+      ENV_FILE: /etc/tag-api.env
       SERVICE: tag-api
+      RUN_USER: www-data
       PORT: "5080"
+      DB_NAME: TAG
+      REDIS_DB: "9"
+      RATE_LIMIT: "100"
+      MSSQL_CONTAINER: tag-mssql
+      MSSQL_PORT: "1433"
+      MSSQL_VOLUME: tag-mssql-data
 
     steps:
       - name: Checkout
@@ -42,6 +51,33 @@ jobs:
       - name: Install sshpass
         run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
 
+      - name: Provision server
+        env:
+          MSSQL_SA_PASSWORD: ${{ secrets.MSSQL_SA_PASSWORD }}
+          JWT_KEY: ${{ secrets.JWT_KEY }}
+          SEED_ADMIN_PASSWORD: ${{ secrets.SEED_ADMIN_PASSWORD }}
+        run: |
+          b64() { printf "%s" "$1" | base64 -w0; }
+          {
+            echo "export APP_ROOT='$APP_ROOT'"
+            echo "export APP_DIR='$APP_DIR'"
+            echo "export BUILD_DIR='$BUILD_DIR'"
+            echo "export ENV_FILE='$ENV_FILE'"
+            echo "export SERVICE='$SERVICE'"
+            echo "export RUN_USER='$RUN_USER'"
+            echo "export PORT='$PORT'"
+            echo "export DB_NAME='$DB_NAME'"
+            echo "export REDIS_DB='$REDIS_DB'"
+            echo "export RATE_LIMIT='$RATE_LIMIT'"
+            echo "export MSSQL_CONTAINER='$MSSQL_CONTAINER'"
+            echo "export MSSQL_PORT='$MSSQL_PORT'"
+            echo "export MSSQL_VOLUME='$MSSQL_VOLUME'"
+            echo "export MSSQL_SA_PASSWORD=\"\$(echo '$(b64 "$MSSQL_SA_PASSWORD")' | base64 -d)\""
+            echo "export JWT_KEY=\"\$(echo '$(b64 "$JWT_KEY")' | base64 -d)\""
+            echo "export SEED_ADMIN_PASSWORD=\"\$(echo '$(b64 "$SEED_ADMIN_PASSWORD")' | base64 -d)\""
+            cat deploy/provision.sh
+          } | sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SRV_USER@$SRV_HOST" "bash -s"
+
       - name: Upload build
         run: |
           sshpass -e rsync -az --delete \
@@ -51,7 +87,7 @@ jobs:
       - name: Swap release and restart
         run: |
           sshpass -e ssh -o StrictHostKeyChecking=accept-new "$SRV_USER@$SRV_HOST" \
-            APP_DIR="$APP_DIR" BUILD_DIR="$BUILD_DIR" SERVICE="$SERVICE" bash -s <<'REMOTE'
+            APP_DIR="$APP_DIR" BUILD_DIR="$BUILD_DIR" SERVICE="$SERVICE" RUN_USER="$RUN_USER" bash -s <<'REMOTE'
           set -euo pipefail
           rm -rf "${APP_DIR}-prev"
           if [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
@@ -60,7 +96,7 @@ jobs:
           fi
           systemctl stop "$SERVICE" || true
           rsync -a --delete "$BUILD_DIR/" "$APP_DIR/"
-          chown -R www-data:www-data "$APP_DIR"
+          chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
           chmod +x "$APP_DIR/API"
           systemctl start "$SERVICE"
           REMOTE
