@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload build
         run: |
-          sshpass -e rsync -az --delete \
+          sshpass -e rsync -az --delete --no-owner --no-group \
             -e "ssh -o StrictHostKeyChecking=accept-new" \
             publish/ "$SRV_USER@$SRV_HOST:$BUILD_DIR/"
 
