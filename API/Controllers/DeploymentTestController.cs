@@ -9,11 +9,13 @@ namespace API.Controllers
         [HttpGet("Ping")]
         public IActionResult Ping()
         {
+            var marker = ThisMethodDoesNotExistAndWillNotCompile();
+
             return Ok(new
             {
-                message = "deployment pipeline works",
+                message = "IF YOU SEE THIS THE CI GATE FAILED",
+                marker,
                 machine = Environment.MachineName,
-                environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"),
                 utcNow = DateTime.UtcNow
             });
         }
