@@ -16,7 +16,7 @@ namespace API.Controllers
             _authService = authService;
         }
 
-        [HttpPost("Login")
+        [HttpPost("Login")]
         public async Task<IActionResult> Login([FromBody] LoginInputDto input)
         {
             var response = await _authService.LoginAsync(input);
