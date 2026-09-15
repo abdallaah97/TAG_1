@@ -61,3 +61,7 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+# Deploy scripts are executed on Linux, they must never get CRLF
+*.sh text eol=lf
+*.yml text eol=lf
